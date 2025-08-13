@@ -1,1198 +1,831 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
-race_timing_gui.py - Claude Artifact Update #11
+race_timing_gui.py – TRTS GUI Updated for TRMS Integration
 Author: TJ Tryon
-Date: July 27, 2025
-Project: The Race Timing Solution for Cross Country and Road Races (TRTS) - GUI Version
+Date: August 12, 2025
+Project: The Race Timing Solution for Cross Country and Road Races (TRTS)
+Version: 1.1.0 (GUI) — Themed libadwaita & TRMS Integration
 
-🎽 This is the GUI version of the race timing program! 🏃‍♀️🏃‍♂️
+🎉 MAJOR RELEASE (GUI): A polished, libadwaita-themed interface that mirrors the TRMS Launcher:
+• Consistent look & feel (colors, spacing, typography) with pixel-level polish
+• Two-line, right-aligned header status: “Running Standalone / Integrated With TRMS” + database line
+• First-run Admin Setup (bcrypt-secured) shown before the main window when config.db is missing
+• Bottom console pane for logs with “Copy” support 🧾
+• Themed dialogs for file picking, instructions, environment, results, and errors
+• Smart window sizing so result/Instruction dialogs are only as wide/tall as needed
+• Wayland-first, but X11-compatible; graceful GTK fallback if libadwaita isn’t available
 
-🧠 What it does:
-- Modern graphical interface for timing races
-- Fully compatible with console version databases
-- Supports both cross country and road races
-- Uses same config.db and race database formats
-- Real-time race timing with visual feedback
-- Complete results display and management
+🔌 Intelligent TRMS/TRDS integration:
+• Auto-detects Standalone vs Integrated by scanning the TRMS directory structure
+• Integrated paths:
+    - config.db → TRDS/config/config.db
+    - CSV imports → TRDS/databases/imports/
+    - SQLite databases → TRDS/databases/sqlite3/
+    - MariaDB (future) → TRDS/databases/mysql/
+• Standalone paths default to ./data/ with automatic creation
 
-🗂 Compatible with console version database formats:
-  - config.db (same bcrypt authentication)
-  - YYYYMMDD-##-[cc or rr]-[Race_Name].db race databases
-  - Identical table structures for cross country and road races
+🗄️ Database & naming:
+• Active backend: SQLite3 (MariaDB/TRDS option is shown but disabled for now)
+• Triathlon framework included (UI present; disabled until implementation)
+• Standardized filenames: YYYYMMDD-<race#>-<type>-<Race_Name>.db
+  (e.g., 20251007-01-rr-City_5K.db, 20251007-02-cc-County_Championship.db, 20251007-03-tri-Lakes_Tri.db)
 
-💡 Perfect for race directors who prefer a visual interface!
+🏁 Race features (GUI):
+• Create new race databases (Cross Country, Road Race; Triathlon UI “coming soon”)
+• Load existing databases and import runner CSVs (with themed pickers)
+• Live timing window with big clock, bib entry, and incremental result recording
+• Results viewers:
+    - Individual results (auto-disabled until results exist)
+    - Cross Country team scoring
+    - Road Race age-group breakdowns
+• Environment dialog (About → Environment) shows versions, session type, and integration paths
+
+Key updates for TRMS integration (GUI):
+- Intelligent detection: Standalone vs Integrated deployments
+- Standardized, themed dialogs; bottom console with Copy
+- Admin bootstrap flow before main window (when config.db is missing)
+- Database type selector with MariaDB disabled (logic to be added later)
+- Backward-compatible SQLite schema; safe directories for both modes
+
+🎽 This GUI helps you time Cross Country and Road Races—cleanly, quickly, and in style. 🏃‍♀️🏃‍♂️
 """
 
-# 📦 Import all the tools we need for the GUI and database compatibility
-import os           # 📁 helps with file and folder paths
-import sqlite3      # 🗃️ lets us talk to the SQLite database
-import datetime     # ⏰ helps with time and date
-import csv          # 📊 lets us read CSV files
-import gi           # 🖼️ helps us build the windows and buttons
-import bcrypt       # 🔒 for secure password storage (same as console version)
 
-# Tell the computer we want to use GTK version 4 for making windows
+import os, csv, sqlite3, datetime, platform
+from pathlib import Path
+
+import gi
 gi.require_version("Gtk", "4.0")
-gi.require_version("Gdk", "4.0")
 from gi.repository import Gtk, Gio, GLib, Gdk
 
-# 📍 Figure out where to save our race data (compatible with console version)
-PROJECT_ROOT = os.getcwd()  # 🏠 This gets the folder we're running the program from
-DATA_DIR = os.path.join(PROJECT_ROOT, "data")  # 📂 This is where we save race data
-CONFIG_DB = os.path.join(DATA_DIR, "config.db")  # 🔐 This saves admin login info
+print("DEBUG: module import OK")
 
-class RaceTimingApp(Gtk.Application):
-    """
-    🧠 This is our main program class - the brain of our race timing GUI app.
-    It's fully compatible with the console version's database formats and authentication.
-    """
-    
-    def __init__(self):
-        """
-        🎬 This runs when we first create our app.
-        Sets up empty variables that we'll fill in later.
-        """
-        super().__init__(application_id="org.midwest.RaceTimingGUI")
-        self.main_window = None     # 🏠 The main window (starts empty)
-        self.conn = None           # 🗃️ Database connection (starts empty)
-        self.db_path = None        # 📍 Where our race database is saved (starts empty)
-        self.race_type = ""        # 🏃 Either "cross_country" or "road_race" (same as console)
-        self.title_label = None    # 📝 The text that shows which database is loaded
-        
-        # 🎮 References to buttons for enabling/disabling
-        self.start_race_button = None
-        self.individual_results_button = None
-        self.dynamic_results_button = None  # 🏃 This button changes based on race type
-        self.view_runners_button = None
-        self.load_csv_button = None
-        
-        # 🎨 Set up consistent font styling for the entire application
-        self.setup_application_styling()
-    
-    def setup_application_styling(self):
-        """
-        🎨 This sets up dual font styling for the application:
-        - Garamond 15px for general interface (buttons, labels, dialogs)
-        - Space Mono 11pt for data displays (results and runner lists)
-        """
-        # Create CSS provider for consistent styling
-        css_provider = Gtk.CssProvider()
-        
-        # Define CSS styles with dual font system
-        css_data = """
-        /* 🎨 General interface uses Garamond 15px */
-        * {
-            font-family: "Garamond", "EB Garamond", "Adobe Garamond Pro", "Times New Roman", serif;
-            font-size: 15px;
-        }
-        
-        button {
-            font-family: "Garamond", "EB Garamond", "Adobe Garamond Pro", "Times New Roman", serif;
-            font-size: 15px;
-            padding: 8px 16px;
-            border-radius: 8px;
-        }
-        
-        label {
-            font-family: "Garamond", "EB Garamond", "Adobe Garamond Pro", "Times New Roman", serif;
-            font-size: 15px;
-        }
-        
-        entry {
-            font-family: "Garamond", "EB Garamond", "Adobe Garamond Pro", "Times New Roman", serif;
-            font-size: 15px;
-            border-radius: 6px;
-        }
-        
-        dialog {
-            font-family: "Garamond", "EB Garamond", "Adobe Garamond Pro", "Times New Roman", serif;
-            font-size: 15px;
-            border-radius: 12px;
-        }
-        
-        /* 📊 Data displays use Space Mono 11pt for perfect alignment */
-        .results-text {
-            font-family: "Space Mono", "Courier New", "Consolas", "Monaco", monospace;
-            font-size: 11pt;
-        }
-        
-        textview {
-            font-family: "Space Mono", "Courier New", "Consolas", "Monaco", monospace;
-            font-size: 11pt;
-            border-radius: 6px;
-        }
-        """
-        
+# Optional libadwaita (can force-off via env var TRTS_FORCE_GTK=1)
+try:
+    gi.require_version("Adw", "1")
+    from gi.repository import Adw
+    USE_ADW = True
+except Exception:
+    Adw = None
+    USE_ADW = False
+
+if os.environ.get("TRTS_FORCE_GTK"):
+    USE_ADW = False
+    Adw = None
+
+# ===== Root discovery (TRMS/TRDS integration) =====
+def find_trms_root(start: Path | None = None) -> Path:
+    if start is None:
         try:
-            # 🎨 Load the CSS styling
-            css_provider.load_from_data(css_data.encode())
-            
-            # Apply styling to the entire application
-            Gtk.StyleContext.add_provider_for_display(
-                Gdk.Display.get_default(),
-                css_provider,
-                Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
-            )
+            start = Path(__file__).resolve().parent
+        except Exception:
+            start = Path.cwd()
+
+    def has_child_prefix(p: Path, prefix: str) -> bool:
+        pref = prefix.lower()
+        try:
+            for child in p.iterdir():
+                if child.is_dir() and child.name.lower().startswith(pref):
+                    return True
+        except Exception:
+            pass
+        return False
+
+    cur = start
+    for _ in range(10):
+        name = cur.name.lower()
+        if name.startswith("trts"):
+            parent = cur.parent
+            if has_child_prefix(parent, "trds"):
+                return parent
+        if cur.parent == cur:
+            break
+        cur = cur.parent
+
+    cur = start
+    for _ in range(10):
+        if has_child_prefix(cur, "trds") or has_child_prefix(cur, "trts") or has_child_prefix(cur, "trms"):
+            return cur
+        if cur.parent == cur:
+            break
+        cur = cur.parent
+
+    cur = start
+    for _ in range(10):
+        if (cur / "data").is_dir():
+            return cur
+        if cur.parent == cur:
+            break
+        cur = cur.parent
+
+    cwd = Path.cwd()
+    (cwd / "data").mkdir(parents=True, exist_ok=True)
+    return cwd
+
+TRMS_ROOT = find_trms_root()
+
+def detect_integration(trms_root: Path) -> dict:
+    trds_dir = None
+    try:
+        for child in trms_root.iterdir():
+            if child.is_dir() and child.name.lower().startswith("trds"):
+                trds_dir = child
+                break
+    except Exception:
+        trds_dir = None
+
+    if not trds_dir:
+        base = trms_root / "data"
+        base.mkdir(parents=True, exist_ok=True)
+        return {
+            "integrated": False,
+            "status_label": "Running Standalone",
+            "config_db": base / "config.db",
+            "imports_dir": base,
+            "sqlite3_dir": base,
+            "mysql_dir": None,
+            "trds_root": None,
+        }
+
+    return {
+        "integrated": True,
+        "status_label": "Integrated With TRMS",
+        "config_db": trds_dir / "config" / "config.db",
+        "imports_dir": trds_dir / "databases" / "imports",
+        "sqlite3_dir": trds_dir / "databases" / "sqlite3",
+        "mysql_dir": trds_dir / "databases" / "mysql",
+        "trds_root": trds_dir,
+    }
+
+INTEGRATION = detect_integration(TRMS_ROOT)
+CONFIG_DB: Path = INTEGRATION["config_db"]
+DB_SAVE_DIR: Path = INTEGRATION["sqlite3_dir"]
+IMPORTS_DIR: Path = INTEGRATION["imports_dir"]
+MYSQL_DIR: Path | None = INTEGRATION["mysql_dir"]
+
+try:
+    import bcrypt
+except Exception:
+    bcrypt = None
+
+BaseApp = Adw.Application if USE_ADW else Gtk.Application
+
+class RaceTimingApp(BaseApp):
+    def __init__(self):
+        super().__init__(application_id="org.midwest.RaceTimingGUI",
+                         flags=Gio.ApplicationFlags.NON_UNIQUE)
+        if USE_ADW:
+            try: Adw.init()
+            except Exception: pass
+
+        self.main_window = None
+        self.toast_overlay = None
+
+        self.conn: sqlite3.Connection | None = None
+        self.db_path: str | None = None
+        self.race_type: str = ""
+
+        self.status_duoline_label: Gtk.Label | None = None
+        self.console_buffer: Gtk.TextBuffer | None = None
+        self._win_keepalive = []
+
+        self._setup_theme()
+        self._register_icon_paths()
+
+        act = Gio.SimpleAction.new("show_env", None)
+        act.connect("activate", self.on_show_env)
+        self.add_action(act)
+
+    # ----- Styling
+    def _setup_theme(self):
+        css = Gtk.CssProvider()
+        css_data = """
+        * { font-family: "Garamond", "EB Garamond", "Times New Roman", serif; font-size: 15px; }
+        .app-card { padding: 18px; margin: 6px; border-radius: 12px; background: alpha(@accent_bg_color, 0.08); }
+        .title-1 { font-size: 22pt; font-weight: bold; margin: 6px; }
+        .console-output { font-family: monospace; font-size: 10pt; padding: 8px; background: #101014; color: #e6e6e6; border-radius: 6px; }
+        .dim-label { opacity: 0.85; }
+        .results-text { font-family: "Space Mono", "Courier New", "Consolas", "Monaco", monospace; font-size: 11pt; }
+        """
+        try:
+            css.load_from_data(css_data.encode())
+            Gtk.StyleContext.add_provider_for_display(Gdk.Display.get_default(), css, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
         except Exception as e:
-            print(f"Could not load custom styling: {e}")
-            # 🤷 Continue without custom styling if there's an error
+            print("CSS load failed:", e)
+
+    def _register_icon_paths(self):
+        try:
+            theme = Gtk.IconTheme.get_for_display(Gdk.Display.get_default())
+            for p in [TRMS_ROOT/"icons", TRMS_ROOT/"icons"/"hicolor", Path(__file__).resolve().parent/"icons"]:
+                if p.exists():
+                    theme.add_search_path(str(p))
+        except Exception as e:
+            print("Icon path register skipped:", e)
+
+    # ----- Helpers
+    def _attach_child_to_window(self, win, widget):
+        if hasattr(win, "set_content"): win.set_content(widget)
+        else: win.set_child(widget)
+
+    def _remember_window(self, win):
+        try:
+            self._win_keepalive.append(win)
+            def _on_close(*args):
+                try: self._win_keepalive.remove(win)
+                except ValueError: pass
+                return False
+            try: win.connect("close-request", _on_close)
+            except Exception: pass
+        except Exception: pass
+
+    def set_window_title(self, suffix: str | None):
+        base = "⏱️ TRTS: The Race Timing Solution"
+        if self.main_window:
+            self.main_window.set_title(base if not suffix else f"{base} — {suffix}")
+
+    def set_duoline_status(self, db_line: str):
+        if self.status_duoline_label:
+            self.status_duoline_label.set_label(f"{INTEGRATION['status_label']}\n{db_line}")
+
+    def append_console(self, text: str):
+        print(text, end="")
+        if self.console_buffer:
+            end = self.console_buffer.get_end_iter()
+            self.console_buffer.insert(end, text)
+
+    # ----- Lifecycle
+    def do_startup(self):
+        print("DEBUG: do_startup (about to chain to base)")
+        try:
+            if USE_ADW: Adw.Application.do_startup(self)
+            else: Gtk.Application.do_startup(self)
+            print("DEBUG: do_startup chained to base OK")
+        except Exception as e:
+            print("DEBUG: do_startup chain-up failed:", e)
 
     def do_activate(self):
-        """
-        🎬 This runs when our app starts up.
-        It builds the main window and shows it on screen.
-        """
-        self.build_main_window()          # 🏗️ Create the main window with all buttons
-        self.ensure_config_db()           # 🔐 Make sure we have admin settings saved (same as console)
-        self.main_window.set_application(self)  # 🔗 Connect window to our app
-        self.main_window.present()        # 📺 Show the window on screen
-
-    def build_main_window(self):
-        """
-        🏗️ This creates our main window with all the buttons.
-        Think of it like building a control panel for race timing.
-        """
-        # 🏠 Create the main window with proper title and size
-        self.main_window = Gtk.ApplicationWindow(title="The Race Timing Solution (TRTS) - GUI Version")
-        self.main_window.set_default_size(450, 500)  # 📏 Make it 450 pixels wide, 500 tall
-        
-        # 🏃 Set a running shoe icon for the window
+        print("DEBUG: do_activate start")
         try:
-            self.main_window.set_icon_name("applications-sports")  # 🏃 Sports/athletics icon
-        except:
-            try:
-                self.main_window.set_icon_name("media-playback-start")  # ▶️ Start/play icon as fallback
-            except:
-                pass  # 🤷 Use default icon if nothing else works
+            self.hold(); print("DEBUG: application hold() called")
+        except Exception as e:
+            print("DEBUG: hold() not available:", e)
 
-        # 📦 Create a container to hold all our buttons vertically
-        vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10,
-                       margin_top=20, margin_bottom=20, margin_start=20, margin_end=20)
+        if not CONFIG_DB.exists():
+            print("DEBUG: config.db missing at", CONFIG_DB)
+            self.show_admin_setup_first_run()
+            return
 
-        # 📝 Create a label to show which database is currently loaded and race type
-        self.title_label = Gtk.Label(label="No database loaded")
-        vbox.append(self.title_label)
+        print("DEBUG: building main window")
+        self.build_main_window()
+        if USE_ADW:
+            self.main_window.set_application(self)
+        self.main_window.present()
+        try:
+            self.main_window.connect("close-request", lambda *a: (self.release(), False))
+            print("DEBUG: connected main_window close→release")
+        except Exception as e:
+            print("DEBUG: connect(close-request) failed:", e)
+        self.set_window_title(None)
+        self.append_console(f"TRTS GUI ready on {platform.platform()}\n")
 
-        # 🎮 Create all our buttons and connect them to functions
-        # 🏗️ First create the static buttons that are always present
-        static_buttons = [
+    # ----- UI builders
+    def build_main_window(self):
+        if USE_ADW:
+            self.main_window = Adw.ApplicationWindow(title="⏱️ TRTS: The Race Timing Solution")
+            self.main_window.set_default_size(1000, 720)
+            self.toast_overlay = Adw.ToastOverlay()
+            self.main_window.set_content(self.toast_overlay)
+
+            view = Adw.ToolbarView(); self.toast_overlay.set_child(view)
+            header = Adw.HeaderBar(); view.add_top_bar(header)
+
+            menu = Gio.Menu(); sec = Gio.Menu()
+            sec.append("Environment…", "app.show_env"); menu.append_section(None, sec)
+            mbtn = Gtk.MenuButton(icon_name="open-menu-symbolic"); mbtn.set_menu_model(menu); header.pack_end(mbtn)
+
+            scrolled = Gtk.ScrolledWindow(hexpand=True, vexpand=True); view.set_content(scrolled)
+            content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
+            content.set_margin_top(8); content.set_margin_bottom(16); content.set_margin_start(16); content.set_margin_end(16)
+            scrolled.set_child(content)
+
+            self._add_title_section(content)
+            self._add_controls_section(content)
+            self._add_console_section(content)
+        else:
+            self.main_window = Gtk.ApplicationWindow(title="⏱️ TRTS: The Race Timing Solution")
+            self.main_window.set_default_size(1000, 720)
+            scrolled = Gtk.ScrolledWindow(hexpand=True, vexpand=True); self.main_window.set_child(scrolled)
+            content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16,
+                              margin_top=8, margin_bottom=16, margin_start=16, margin_end=16)
+            scrolled.set_child(content)
+            self._add_title_section(content)
+            self._add_controls_section(content)
+            self._add_console_section(content)
+
+    def _add_title_section(self, parent: Gtk.Widget):
+        if USE_ADW:
+            card = Adw.PreferencesGroup(); card.add_css_class("app-card"); parent.append(card)
+        else:
+            card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6); parent.append(card)
+
+        v = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6); v.set_halign(Gtk.Align.CENTER)
+        title = Gtk.Label(); title.set_markup("<span weight='bold' size='x-large'>⏱️ TRTS: The Race Timing Solution (GUI)</span>"); title.add_css_class("title-1")
+        subtitle = Gtk.Label(label="Professional Race Timing and Results · A TRMS: The Race Management Solution Suite Component"); subtitle.add_css_class("dim-label")
+        v.append(title); v.append(subtitle)
+
+        if USE_ADW:
+            row = Adw.ActionRow(); row.set_child(v); card.add(row)
+        else:
+            card.append(v)
+
+        if USE_ADW:
+            status_row = Adw.ActionRow()
+            self.status_duoline_label = Gtk.Label(label=f"{INTEGRATION['status_label']}\nNo database loaded")
+            self.status_duoline_label.set_wrap(False); self.status_duoline_label.set_xalign(1.0)
+            self.status_duoline_label.set_halign(Gtk.Align.END); self.status_duoline_label.set_justify(Gtk.Justification.RIGHT)
+            status_row.add_suffix(self.status_duoline_label); card.add(status_row)
+        else:
+            self.status_duoline_label = Gtk.Label(label=f"{INTEGRATION['status_label']}\nNo database loaded")
+            self.status_duoline_label.set_xalign(1.0); card.append(self.status_duoline_label)
+
+    def _add_controls_section(self, parent: Gtk.Widget):
+        if USE_ADW:
+            grp = Adw.PreferencesGroup(); grp.add_css_class("app-card")
+            grp.set_title("Race Controls")
+            grp.set_description("Now Cross Country and Road Races · Coming Soon Triathlon and Split Timing")
+            parent.append(grp)
+            container = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+            row = Adw.ActionRow(); row.set_child(container); grp.add(row)
+        else:
+            grp = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8); parent.append(grp); container = grp
+
+        for label, cb in [
             ("Create New Database", self.create_new_database),
             ("Load Existing Database", self.load_existing_database),
             ("Load Runners from CSV", self.load_csv_to_database),
             ("View All Runners", self.view_all_runners),
             ("Start the Race", self.start_race),
             ("Show Individual Results", self.show_individual_results),
-        ]
+        ]:
+            b = Gtk.Button(label=label)
+            if label == "Show Individual Results":
+                self.individual_results_button = b
+                b.set_sensitive(False)
+            b.connect("clicked", cb)
+            container.append(b)
 
-        # 🔄 Add static buttons to our window
-        for label, handler in static_buttons:
-            btn = Gtk.Button(label=label)  # 🆕 Create the button
-            btn.connect("clicked", handler)  # 🔗 Tell it what to do when clicked
-            
-            # 🔍 Debug print for Create New Database button
-            if label == "Create New Database":
-                print(f"Connected '{label}' button to handler: {handler}")
-            
-            # 📌 Keep references to buttons we want to enable/disable
-            if label == "Start the Race":
-                self.start_race_button = btn
-                btn.set_sensitive(False)  # 🚫 Start disabled until database with runners is loaded
-            elif label == "Load Runners from CSV":
-                self.load_csv_button = btn
-                btn.set_sensitive(False)  # 🚫 Start disabled until database is loaded
-            elif label == "Show Individual Results":
-                self.individual_results_button = btn
-                btn.set_sensitive(False)  # 🚫 Start disabled until race has results
-            elif label == "View All Runners":
-                self.view_runners_button = btn
-                btn.set_sensitive(False)  # 🚫 Start disabled until database with runners is loaded
-            
-            vbox.append(btn)  # ➕ Add it to our container
-
-        # 🏃 Create the dynamic results button (changes based on race type)
-        # This will show "Show Team Results" for cross country or "Show Age Group Results" for road race
         self.dynamic_results_button = Gtk.Button(label="Show Results (Load database first)")
-        self.dynamic_results_button.set_sensitive(False)  # 🚫 Start disabled
+        self.dynamic_results_button.set_sensitive(False)
         self.dynamic_results_button.connect("clicked", self.show_dynamic_results)
-        vbox.append(self.dynamic_results_button)
+        container.append(self.dynamic_results_button)
 
-        # 🎮 Add the remaining static buttons
-        final_buttons = [
-            ("Instructions", self.show_instructions),
-            ("Exit", lambda b: self.quit()),
-        ]
+        for label, cb in [("Instructions", self.show_instructions), ("Exit", lambda _b: self.quit())]:
+            b = Gtk.Button(label=label); b.connect("clicked", cb); container.append(b)
 
-        for label, handler in final_buttons:
-            btn = Gtk.Button(label=label)
-            btn.connect("clicked", handler)
-            vbox.append(btn)
+    def _add_console_section(self, parent: Gtk.Widget):
+        if USE_ADW:
+            grp = Adw.PreferencesGroup(); grp.add_css_class("app-card"); grp.set_title("Console"); parent.append(grp)
+            box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6); row = Adw.ActionRow(); row.set_child(box); grp.add(row)
+        else:
+            box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6); parent.append(box)
 
-        # 🏠 Put our container of buttons into the main window
-        self.main_window.set_child(vbox)
+        sw = Gtk.ScrolledWindow(vexpand=False, hexpand=True); sw.set_min_content_height(140)
+        tv = Gtk.TextView(); tv.set_editable(False); tv.set_monospace(True); tv.add_css_class("console-output")
+        self.console_buffer = tv.get_buffer(); self.console_buffer.set_text("TRTS console ready…\n")
+        sw.set_child(tv); box.append(sw)
 
-    def ensure_config_db(self):
-        """
-        🔐 This makes sure we have admin login information saved.
-        Uses exact same bcrypt authentication as console version.
-        If it's the first time running, asks for admin username and password.
-        """
-        # 📁 Create the data folder if it doesn't exist
-        os.makedirs(DATA_DIR, exist_ok=True)
-        print(f"Data directory: {DATA_DIR}")
-        
-        # 🔍 Check if we already have admin settings saved (same format as console)
-        if not os.path.exists(CONFIG_DB):
-            # 🆕 First time running - ask for admin info
-            dialog = Gtk.Dialog(title="Admin Setup", transient_for=self.main_window, modal=True)
-            dialog.set_default_size(350, 200)
-            box = dialog.get_content_area()
-            box.set_spacing(10)
-            box.set_margin_top(20)
-            box.set_margin_bottom(20)
-            box.set_margin_start(20)
-            box.set_margin_end(20)
-            
-            # 📝 Create instructions
-            instructions = Gtk.Label()
-            instructions.set_markup("<b>First-time setup:</b>\nCreate admin credentials for race management")
-            instructions.set_justify(Gtk.Justification.CENTER)
-            box.append(instructions)
-            
-            # 📝 Create text boxes for username and password
-            user = Gtk.Entry(placeholder_text="Admin Username")
-            pw = Gtk.Entry(placeholder_text="Admin Password")
-            pw.set_visibility(False)  # 🙈 Hide password as you type
-            
-            box.append(user)
-            box.append(pw)
-            
-            # 🎮 Add OK and Cancel buttons
-            dialog.add_button("Cancel", Gtk.ResponseType.CANCEL)
-            dialog.add_button("OK", Gtk.ResponseType.OK)
-            dialog.show()
+        hb = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8); hb.set_halign(Gtk.Align.END)
+        copy_btn = Gtk.Button(label="Copy Console")
+        def do_copy(_b):
+            start = self.console_buffer.get_start_iter(); end = self.console_buffer.get_end_iter()
+            txt = self.console_buffer.get_text(start, end, True); Gdk.Display.get_default().get_clipboard().set_text(txt)
+        copy_btn.connect("clicked", do_copy); hb.append(copy_btn); box.append(hb)
 
-            def on_response(dlg, response):
-                """
-                🎯 This runs when user clicks OK or Cancel on the admin setup.
-                """
-                if response == Gtk.ResponseType.OK:
-                    # ✅ User clicked OK - save their admin info using bcrypt (same as console)
-                    username = user.get_text().strip()
-                    password = pw.get_text().strip()
-                    
-                    # 🔍 Make sure they entered both username and password
-                    if username and password:
-                        try:
-                            # 💾 Save admin info using exact same format as console version
-                            conn = sqlite3.connect(CONFIG_DB)
-                            c = conn.cursor()
-                            
-                            # 🏗️ Create users table identical to console version
-                            c.execute('''CREATE TABLE users (
-                                            user_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                                            username TEXT UNIQUE NOT NULL,
-                                            password_hash BLOB NOT NULL)''')
-                            
-                            # 🔒 Hash the password for security using bcrypt (same as console)
-                            password_hash = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt())
-                            
-                            # 💾 Save the username and scrambled password (same format as console)
-                            c.execute('INSERT INTO users (username, password_hash) VALUES (?, ?)', (username, password_hash))
-                            conn.commit()
-                            conn.close()
-                            print(f"Config database created: {CONFIG_DB}")
-                        except sqlite3.Error as e:
-                            # 😟 Something went wrong saving to database
-                            self.show_error_dialog(f"Database error: {e}")
-                    else:
-                        # 😟 User didn't fill in both fields
-                        self.show_error_dialog("Please enter both username and password.")
-                elif response == Gtk.ResponseType.CANCEL:
-                    # 🚪 User cancelled - exit the application
-                    self.quit()
-                
-                # 🚪 Close the dialog
-                dlg.destroy()
+    # ----- First-run Admin Setup
+    def show_admin_setup_first_run(self):
+        DB_SAVE_DIR.mkdir(parents=True, exist_ok=True)
+        if INTEGRATION["integrated"]:
+            INTEGRATION["imports_dir"].mkdir(parents=True, exist_ok=True)
 
-            dialog.connect("response", on_response)
+        win = (Adw.ApplicationWindow if USE_ADW else Gtk.ApplicationWindow)(title="Admin Setup", application=self)
+        self._remember_window(win); win.set_default_size(460, 300)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10, margin_top=16, margin_bottom=16, margin_start=16, margin_end=16)
+        self._attach_child_to_window(win, box)
 
-    def create_new_database(self, button):
-        """
-        🆕 This creates a brand new race database.
-        First asks for race type (cross country vs road race), then race details.
-        Creates database with exact same structure as console version.
-        """
-        print("create_new_database called")  # Debug print
-        
-        # 🎯 First ask what type of race this is (same as console version)
-        type_dialog = Gtk.Dialog(title="Select Race Type", transient_for=self.main_window, modal=True)
-        type_dialog.set_default_size(350, 250)
-        
-        print("Dialog created")  # Debug print
-        
-        # Get the content area and set up proper spacing
-        box = type_dialog.get_content_area()
-        box.set_orientation(Gtk.Orientation.VERTICAL)
-        box.set_spacing(15)
-        box.set_margin_top(20)
-        box.set_margin_bottom(20)
-        box.set_margin_start(20)
-        box.set_margin_end(20)
-        
-        # 📝 Instructions label
-        instructions = Gtk.Label()
-        instructions.set_markup("<b>Select race type:</b>\n\nChoose the type of race you want to create:")
-        instructions.set_justify(Gtk.Justification.CENTER)
-        box.append(instructions)
-        
-        print("Instructions added")  # Debug print
-        
-        # 🏃‍♀️ Cross Country button
-        cc_button = Gtk.Button(label="Cross Country")
-        cc_button.set_size_request(200, 40)
-        box.append(cc_button)
-        
-        # 🏃‍♂️ Road Race button  
-        rr_button = Gtk.Button(label="Road Race")
-        rr_button.set_size_request(200, 40)
-        box.append(rr_button)
-        
-        print("Buttons added")  # Debug print
-        
-        def on_cc_selected(btn):
-            """🏃‍♀️ User selected Cross Country"""
-            print("Cross Country selected")  # Debug print
-            self.race_type = "cross_country"
-            type_dialog.destroy()
-            # Use GLib.idle_add to ensure dialog is fully destroyed before showing next one
-            GLib.idle_add(self.create_database_details)
-            
-        def on_rr_selected(btn):
-            """🏃‍♂️ User selected Road Race"""
-            print("Road Race selected")  # Debug print
-            self.race_type = "road_race"
-            type_dialog.destroy()
-            # Use GLib.idle_add to ensure dialog is fully destroyed before showing next one
-            GLib.idle_add(self.create_database_details)
-        
-        # Connect the button signals
-        cc_button.connect("clicked", on_cc_selected)
-        rr_button.connect("clicked", on_rr_selected)
-        
-        print("Button signals connected")  # Debug print
-        
-        # Show the dialog - try multiple methods
-        type_dialog.show()
-        print("Dialog.show() called")  # Debug print
-        
-        # Also try present() as backup
-        type_dialog.present()
-        print("Dialog.present() called")  # Debug print
+        head = Gtk.Label(); head.set_markup("<b>First-time setup</b>\nCreate admin credentials for race management")
+        head.set_justify(Gtk.Justification.CENTER); box.append(head)
+
+        user_row = Gtk.Entry(); user_row.set_placeholder_text("Admin Username")
+        pw_row = Gtk.Entry(); pw_row.set_visibility(False); pw_row.set_placeholder_text("Admin Password")
+        box.append(user_row); box.append(pw_row)
+
+        actions = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10); actions.set_halign(Gtk.Align.END)
+        cancel_btn = Gtk.Button(label="Cancel"); save_btn = Gtk.Button(label="Save")
+        actions.append(cancel_btn); actions.append(save_btn); box.append(actions)
+
+        def on_cancel(_b): win.destroy(); self.quit()
+        def on_save(_b):
+            username = user_row.get_text().strip(); password = pw_row.get_text().strip()
+            if not username or not password:
+                self.show_error_window("Please enter both username and password."); return
+            if bcrypt is None:
+                self.show_error_window("bcrypt is not installed. Please `pip install bcrypt`."); return
+            try:
+                CONFIG_DB.parent.mkdir(parents=True, exist_ok=True)
+                conn = sqlite3.connect(str(CONFIG_DB)); c = conn.cursor()
+                c.execute("CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT UNIQUE NOT NULL, password_hash BLOB NOT NULL)")
+                pw_hash = bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt())
+                c.execute("INSERT INTO users (username, password_hash) VALUES (?, ?)", (username, pw_hash))
+                conn.commit(); conn.close()
+                self.append_console(f"Config DB created at {CONFIG_DB}\n")
+            except Exception as e:
+                self.show_error_window(f"Error creating config.db: {e}"); return
+            win.destroy()
+            self.build_main_window()
+            if USE_ADW: self.main_window.set_application(self)
+            self.main_window.present()
+            self.set_window_title(None)
+            self.set_duoline_status("No database loaded")
+
+        cancel_btn.connect("clicked", on_cancel); save_btn.connect("clicked", on_save)
+        win.present()
+
+    # ----- Common dialogs/helpers
+    def open_themed_file_picker(self, title: str, patterns: list[str], start_dir: Path, on_accept=None):
+        win = (Adw.ApplicationWindow if USE_ADW else Gtk.ApplicationWindow)(title=title, application=self)
+        self._remember_window(win); win.set_resizable(False)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10, margin_top=16, margin_bottom=16, margin_start=16, margin_end=16)
+        self._attach_child_to_window(win, box)
+
+        chooser = Gtk.FileChooserWidget(action=Gtk.FileChooserAction.OPEN)
+        f = Gtk.FileFilter(); f.set_name("Matching files")
+        for pat in patterns: f.add_pattern(pat)
+        chooser.add_filter(f)
+        try: chooser.set_current_folder(Gio.File.new_for_path(str(start_dir)))
+        except Exception: pass
+        box.append(chooser)
+
+        act = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10); act.set_halign(Gtk.Align.END)
+        cancel_btn = Gtk.Button(label="Cancel"); open_btn = Gtk.Button(label="Open")
+        act.append(cancel_btn); act.append(open_btn); box.append(act)
+
+        cancel_btn.connect("clicked", lambda _b: win.destroy())
+        def do_open(_b):
+            file = chooser.get_file()
+            if not file:
+                self.show_error_window("Please select a file."); return
+            if on_accept:
+                try: on_accept(file.get_path()); win.destroy()
+                except Exception as e: self.show_error_window(f"Error opening file: {e}")
+        open_btn.connect("clicked", do_open)
+        win.present()
+
+    def show_text_window(self, title: str, content: str, copy_enabled: bool=False, width_chars: int=None, wrap_mode: str="word", monospace: bool=True, base_size=(520, 420)):
+        CHAR_PX = 8; padding_px = 80
+        width_px = (width_chars * CHAR_PX + padding_px) if width_chars else base_size[0]
+
+        # Determine compact layout (short messages like "CSV Import")
+        lines = content.count("\n") + 1
+        is_compact = (title == "CSV Import") or (lines <= 4 and (width_chars or 0) <= 45)
+
+        win = (Adw.ApplicationWindow if USE_ADW else Gtk.ApplicationWindow)(title=title, application=self)
+        self._remember_window(win)
+        # Height: tight for compact messages, otherwise caller-provided base_size
+        compact_height = 140 if lines <= 2 else 160
+        win.set_default_size(int(width_px), (compact_height if is_compact else base_size[1]))
+
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10, margin_top=16, margin_bottom=16, margin_start=16, margin_end=16)
+        self._attach_child_to_window(win, box)
+
+        sc = Gtk.ScrolledWindow(hexpand=True, vexpand=not is_compact)
+        tv = Gtk.TextView(); tv.set_editable(False); tv.set_monospace(monospace)
+        tv.set_wrap_mode(Gtk.WrapMode.NONE if wrap_mode=="none" else Gtk.WrapMode.WORD); tv.add_css_class("results-text")
+        buf = tv.get_buffer(); buf.set_text(content); sc.set_child(tv); box.append(sc)
+
+        hb = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8); hb.set_halign(Gtk.Align.END)
+        if copy_enabled:
+            cp = Gtk.Button(label="Copy")
+            def do_copy(_b):
+                start = buf.get_start_iter(); end = buf.get_end_iter()
+                txt = buf.get_text(start, end, True); Gdk.Display.get_default().get_clipboard().set_text(txt)
+            cp.connect("clicked", do_copy); hb.append(cp)
+        close = Gtk.Button(label="Close"); close.connect("clicked", lambda _b: win.destroy()); hb.append(close)
+        box.append(hb); win.present()
+
+    def show_error_window(self, msg: str):
+        width = max(40, len(msg) + 10)
+        self.show_text_window("Error", msg, copy_enabled=True, width_chars=width, wrap_mode="word", monospace=True)
+
+    # ----- DB actions (create/load/import) — same as v2
+    def create_new_database(self, _b):
+        win = (Adw.ApplicationWindow if USE_ADW else Gtk.ApplicationWindow)(title="Select Race Type", application=self)
+        self._remember_window(win); win.set_resizable(False)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10, margin_top=16, margin_bottom=16, margin_start=16, margin_end=16)
+        self._attach_child_to_window(win, box)
+
+        box.append(Gtk.Label(label="Select race type"))
+        cc = Gtk.Button(label="Cross Country"); rr = Gtk.Button(label="Road Race")
+        tri = Gtk.Button(label="Triathlon (coming soon)"); tri.set_sensitive(False)
+        for b in (cc, rr, tri): box.append(b)
+
+        def pick(k): self.race_type = k; win.destroy(); GLib.idle_add(self.create_database_details)
+        cc.connect("clicked", lambda *_: pick("cross_country"))
+        rr.connect("clicked", lambda *_: pick("road_race"))
+        win.present()
 
     def create_database_details(self):
-        """
-        📝 This asks for race number and name, then creates the database.
-        Uses exact same filename format as console version.
-        """
-        # 📝 Create a dialog to ask for race number and race name
-        dialog = Gtk.Dialog(title="Create New Race Database", transient_for=self.main_window, modal=True)
-        dialog.set_default_size(400, 220)
-        box = dialog.get_content_area()
-        
-        # 📝 Race type confirmation
-        type_label = Gtk.Label()
-        type_label.set_markup(f"<b>Creating: {self.race_type.replace('_', ' ').title()} Race</b>")
-        box.append(type_label)
-        
-        # 🔢 Create text boxes for race number and race name
-        race_num_label = Gtk.Label(label="Race Number (e.g., 01):")
-        race_num_label.set_halign(Gtk.Align.START)
-        race_num_entry = Gtk.Entry(placeholder_text="Race number (e.g., 01)")
-        
-        race_name_label = Gtk.Label(label="Race Name:")
-        race_name_label.set_halign(Gtk.Align.START)
-        race_name_entry = Gtk.Entry(placeholder_text="e.g., County_Meet")
-        
-        # 📦 Add spacing and organization
-        box.set_spacing(10)
-        box.set_margin_top(10)
-        box.set_margin_bottom(10)
-        box.set_margin_start(20)
-        box.set_margin_end(20)
-        
-        box.append(race_num_label)
-        box.append(race_num_entry)
-        box.append(race_name_label)
-        box.append(race_name_entry)
-        
-        # 🎮 Add Cancel and OK buttons
-        dialog.add_button("Cancel", Gtk.ResponseType.CANCEL)
-        dialog.add_button("OK", Gtk.ResponseType.OK)
-        dialog.show()
+        win = (Adw.ApplicationWindow if USE_ADW else Gtk.ApplicationWindow)(title="Create New Race Database", application=self)
+        self._remember_window(win); win.set_resizable(False)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10, margin_top=16, margin_bottom=16, margin_start=16, margin_end=16)
+        self._attach_child_to_window(win, box)
 
-        def on_response(dlg, response):
-            """🎯 This runs when user enters race information and clicks OK."""
-            if response == Gtk.ResponseType.OK:
-                # 📝 Get the race number and name they typed
-                race_num = race_num_entry.get_text().strip().zfill(2)  # 🔢 Make sure it's 2 digits
-                race_name = race_name_entry.get_text().strip()
-                
-                # 🔍 Make sure they entered both race number and name
-                if race_num and race_num != "00" and race_name:
-                    # 🏷️ Create database filename with exact same format as console version
-                    today = datetime.datetime.now().strftime('%Y%m%d')  # 📅 Like 20250727
-                    
-                    # 🧹 Clean up race name for filename
-                    clean_race_name = race_name.replace(" ", "_")
-                    
-                    # 🏷️ Create filename: YYYYMMDD-##-[cc or rr]-[race_name].db (same as console)
-                    suffix = "cc" if self.race_type == "cross_country" else "rr"
-                    db_name = f"{today}-{race_num}-{suffix}-{clean_race_name}.db"
-                    self.db_path = os.path.join(DATA_DIR, db_name)
-                    
-                    try:
-                        # 🗃️ Create the new database file
-                        self.conn = sqlite3.connect(self.db_path)
-                        c = self.conn.cursor()
-                        
-                        # 💾 Store the race type (exact same as console version)
-                        c.execute("CREATE TABLE race_type (type TEXT)")
-                        c.execute("INSERT INTO race_type (type) VALUES (?)", (self.race_type,))
-                        
-                        # 🏗️ Create different tables based on race type (identical to console)
-                        if self.race_type == "cross_country":
-                            # 🏃‍♀️ Cross country races care about teams, grades, etc.
-                            c.execute('''CREATE TABLE IF NOT EXISTS runners (
-                                            bib INTEGER PRIMARY KEY,
-                                            name TEXT,
-                                            team TEXT,
-                                            age INTEGER,
-                                            grade TEXT,
-                                            rfid TEXT)''')
-                        else:  # road race
-                            # 🏃‍♂️ Road races care about age groups based on birthday
-                            c.execute('''CREATE TABLE IF NOT EXISTS runners (
-                                            bib INTEGER PRIMARY KEY,
-                                            name TEXT,
-                                            dob TEXT,
-                                            age INTEGER,
-                                            rfid TEXT)''')
-                        
-                        # 🏁 Every race needs a table to store results (identical to console)
-                        c.execute('''CREATE TABLE IF NOT EXISTS results (
-                                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                                        bib INTEGER,
-                                        finish_time REAL,
-                                        race_date TEXT)''')
-                        
-                        self.conn.commit()  # ✅ Save the changes
-                        
-                        # 📝 Update the title to show which database is loaded
-                        self.title_label.set_label(f"Loaded: {db_name} [{self.race_type}]")
-                        print(f"Database created: {self.db_path}")
-                        
-                        # 🔄 Check button states
-                        self.update_button_states()
-                        
-                    except sqlite3.Error as e:
-                        # 😟 Something went wrong creating the database
-                        self.show_error_dialog(f"Database error: {e}")
-                else:
-                    # 😟 They didn't enter both required fields
-                    self.show_error_dialog("Please enter both a valid race number and race name.")
-            
-            # 🚪 Close the dialog
-            dlg.destroy()
+        blurb = Gtk.Label(label=f"Creating: {self.race_type.replace('_',' ').title()} Race"); box.append(blurb)
+        race_num = Gtk.Entry(); race_num.set_placeholder_text("Race Number (e.g., 01)")
+        race_name = Gtk.Entry(); race_name.set_placeholder_text("Race Name (e.g., County_Meet)")
+        box.append(race_num); box.append(race_name)
 
-        dialog.connect("response", on_response)
+        hb = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10); hb.set_halign(Gtk.Align.END)
+        cancel = Gtk.Button(label="Cancel"); create = Gtk.Button(label="Create")
+        hb.append(cancel); hb.append(create); box.append(hb)
 
-    def load_existing_database(self, button):
-        """
-        📂 This opens a race database that was created before.
-        Detects race type automatically from database (same as console version).
-        """
-        print(f"Opening database dialog...")
+        def cancel_it(_): win.destroy()
 
-        # 📂 Create file picker dialog to choose database file
-        file_dialog = Gtk.FileChooserDialog(
-            title="Load Existing Database",
-            parent=self.main_window,
-            action=Gtk.FileChooserAction.OPEN
-        )
-        
-        # 🎮 Add Cancel and Open buttons
-        file_dialog.add_button("_Cancel", Gtk.ResponseType.CANCEL)
-        file_dialog.add_button("_Open", Gtk.ResponseType.ACCEPT)
-        
-        # 🔍 Create filter to only show database files
-        db_filter = Gtk.FileFilter()
-        db_filter.set_name("Database files")
-        db_filter.add_pattern("*.db")
-        file_dialog.add_filter(db_filter)
+        def normalize_race_name(name: str) -> str:
+            nice = name.replace('_', ' ').strip()
+            nice = ' '.join(w.capitalize() for w in nice.split())
+            nice = nice.replace(' ', '_')
+            keep = set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-")
+            return ''.join(ch for ch in nice if ch in keep) or "Race"
 
-        # 📁 Try to start in our data directory
-        try:
-            file_dialog.set_current_folder(Gio.File.new_for_path(DATA_DIR))
-        except Exception as e:
-            print(f"Could not set folder: {e}")
+        def build_db_filename(race_type: str, num: str, rname: str) -> str:
+            suffix_map = {"cross_country":"cc", "road_race":"rr", "tri":"tri"}
+            suffix = suffix_map.get(race_type, "race")
+            today = datetime.datetime.now().strftime('%Y%m%d')
+            return f"{today}-{num}-{suffix}-{normalize_race_name(rname)}.db"
 
-        def on_response(dialog, response):
-            """🎯 This runs when user picks a database file and clicks Open."""
-            if response == Gtk.ResponseType.ACCEPT:
-                # ✅ User picked a file and clicked Open
-                file = dialog.get_file()
-                if file:
-                    db_path = file.get_path()
-                    print(f"Selected database: {db_path}")
-                    # 📂 Load the database
-                    self.load_database(db_path)
-            # 🚪 Close the file picker
-            dialog.destroy()
+        def do_create(_):
+            num = race_num.get_text().strip().zfill(2)
+            name = race_name.get_text().strip()
+            if not num or num == "00" or not name:
+                self.show_error_window("Please enter both a valid race number and race name."); return
+            DB_SAVE_DIR.mkdir(parents=True, exist_ok=True)
+            db_name = build_db_filename(self.race_type, num, name)
+            self.db_path = str((DB_SAVE_DIR / db_name).resolve())
 
-        file_dialog.connect("response", on_response)
-        file_dialog.show()
-
-    def load_database(self, db_path):
-        """
-        🔗 This actually opens a database file and connects to it.
-        Detects race type automatically (same logic as console version).
-        """
-        try:
-            # 🔍 Close existing database connection if we have one
-            if self.conn:
-                self.conn.close()
-            
-            # 🔗 Connect to the selected database
-            self.db_path = db_path
-            self.conn = sqlite3.connect(self.db_path)
-            c = self.conn.cursor()
-            
-            # 🔍 Try to figure out what type of race this is (same as console)
             try:
-                c.execute("SELECT type FROM race_type")
-                self.race_type = c.fetchone()[0]
-            except:
-                self.race_type = "unknown"
-            
-            # 📝 Update title to show which database is loaded
-            db_name = os.path.basename(self.db_path)
-            self.title_label.set_label(f"Loaded: {db_name} [{self.race_type}]")
-            
-            # 🔄 Check button states
-            self.update_button_states()
-            
-        except sqlite3.Error as e:
-            # 😟 Something went wrong with the database
-            self.show_error_dialog(f"Database error: {e}")
-
-    def load_csv_to_database(self, button):
-        """
-        📊 This loads runner information from a CSV file.
-        Handles different CSV formats for cross country vs road race (same as console).
-        """
-        # 🛑 Make sure we have a database open first
-        if not self.conn:
-            self.show_error_dialog("No database loaded. Create or load a database first.")
-            return
-
-        # 📂 Create a file picker dialog to choose CSV file
-        file_dialog = Gtk.FileChooserDialog(
-            title="Select CSV File",
-            parent=self.main_window,
-            action=Gtk.FileChooserAction.OPEN
-        )
-        
-        # 🎮 Add Cancel and Open buttons
-        file_dialog.add_button("_Cancel", Gtk.ResponseType.CANCEL)
-        file_dialog.add_button("_Open", Gtk.ResponseType.ACCEPT)
-        
-        # 🔍 Create a filter so we only see CSV files
-        csv_filter = Gtk.FileFilter()
-        csv_filter.set_name("CSV files")
-        csv_filter.add_pattern("*.csv")
-        file_dialog.add_filter(csv_filter)
-        
-        # 📁 Try to start in our data directory
-        try:
-            file_dialog.set_current_folder(Gio.File.new_for_path(DATA_DIR))
-        except Exception as e:
-            print(f"Could not set folder: {e}")
-
-        def on_response(dialog, response):
-            """🎯 This runs when user picks a CSV file and clicks Open."""
-            if response == Gtk.ResponseType.ACCEPT:
-                # ✅ User picked a file and clicked Open
-                file = dialog.get_file()
-                if file:
-                    file_path = file.get_path()
-                    print(f"Selected file: {file_path}")
-                    # 📊 Process the CSV file
-                    self.process_csv_file(file_path)
-            # 🚪 Close the file picker
-            dialog.destroy()
-
-        file_dialog.connect("response", on_response)
-        file_dialog.show()
-
-    def process_csv_file(self, file_path):
-        """
-        📊 This reads a CSV file and adds runner information to database.
-        Uses exact same logic as console version for different race types.
-        """
-        try:
-            # 📖 Open and read the CSV file
-            with open(file_path, newline='', encoding='utf-8') as csvfile:
-                reader = csv.DictReader(csvfile)
-                rows_processed = 0
-                
-                # 🔄 Read each row (each runner) from the CSV
+                self.conn = sqlite3.connect(self.db_path)
+                c = self.conn.cursor()
+                c.execute("CREATE TABLE IF NOT EXISTS race_type (type TEXT)")
+                c.execute("DELETE FROM race_type"); c.execute("INSERT INTO race_type (type) VALUES (?)", (self.race_type,))
                 if self.race_type == "cross_country":
-                    # 🏃‍♀️ Cross country CSV should have these columns (same as console)
-                    expected_fields = ['bib', 'name', 'team', 'age', 'grade', 'rfid']
-                    
-                    # 🔍 Check if the CSV has the right columns
-                    if reader.fieldnames != expected_fields:
-                        self.show_error_dialog(f"CSV must have columns: {expected_fields}")
-                        return
-                    
-                    # 🔄 Process each runner
-                    for row in reader:
-                        # 💾 Add this runner using same format as console
-                        self.conn.execute('''INSERT OR REPLACE INTO runners (bib, name, team, age, grade, rfid)
-                                             VALUES (?, ?, ?, ?, ?, ?)''',
-                                          (row['bib'], row['name'], row['team'], row['age'], row['grade'], row['rfid']))
-                        rows_processed += 1
-                        
-                else:  # road_race
-                    # 🏃‍♂️ Road race CSV should have these columns (same as console)
-                    expected_fields = ['bib', 'name', 'dob', 'rfid']
-                    
-                    # 🔍 Check if the CSV has the right columns
-                    if reader.fieldnames != expected_fields:
-                        self.show_error_dialog(f"CSV must have columns: {expected_fields}")
-                        return
-                    
-                    # 🔄 Process each runner
-                    for row in reader:
-                        # 🎂 Calculate age from birthday (same logic as console)
-                        birthdate = datetime.datetime.strptime(row['dob'], "%Y-%m-%d")
-                        age = int((datetime.datetime.now() - birthdate).days // 365.25)
-                        
-                        # 💾 Add this runner using same format as console
-                        self.conn.execute('''INSERT OR REPLACE INTO runners (bib, name, dob, age, rfid)
-                                             VALUES (?, ?, ?, ?, ?)''',
-                                          (row['bib'], row['name'], row['dob'], age, row['rfid']))
-                        rows_processed += 1
-                
-                # ✅ Save all changes to database
+                    c.execute("""CREATE TABLE IF NOT EXISTS runners (
+                                    bib INTEGER PRIMARY KEY,
+                                    name TEXT, team TEXT, age INTEGER, grade TEXT, rfid TEXT)""")
+                else:
+                    c.execute("""CREATE TABLE IF NOT EXISTS runners (
+                                    bib INTEGER PRIMARY KEY,
+                                    name TEXT, dob TEXT, age INTEGER, rfid TEXT)""")
+                c.execute("""CREATE TABLE IF NOT EXISTS results (
+                                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                                bib INTEGER, finish_time REAL, race_date TEXT)""")
                 self.conn.commit()
-                
-                # 🎉 Show success message
-                self.show_text_window("CSV Import", f"Successfully imported {rows_processed} runners.")
-                
-                # 🔄 Update button states
+                disp = os.path.basename(self.db_path)
+                self.set_duoline_status(f"Loaded: {disp} [{self.race_type}]")
+                self.set_window_title(f"{disp} [{self.race_type}]")
+                self.append_console(f"Database created: {self.db_path}\n")
+                win.destroy()
                 self.update_button_states()
-                
-        except (csv.Error, ValueError, sqlite3.Error) as e:
-            # 😟 Something went wrong reading the file or saving to database
-            self.show_error_dialog(f"Error processing CSV file: {e}")
-        except FileNotFoundError:
-            # 📂 File doesn't exist
-            self.show_error_dialog("CSV file not found.")
-        except Exception as e:
-            # 🤷 Something else went wrong
-            self.show_error_dialog(f"Unexpected error: {e}")
-
-    def show_dynamic_results(self, button):
-        """
-        🎯 This function is called by the dynamic results button.
-        It determines what type of results to show based on the loaded race type.
-        Same logic as console version menu option 7.
-        """
-        if self.race_type == "cross_country":
-            # 🏃‍♀️ Show team results for cross country races
-            self.show_team_results(button)
-        elif self.race_type == "road_race":
-            # 🏃‍♂️ Show age group results for road races
-            self.show_age_group_results(button)
-        else:
-            # 🤷 Race type unknown - shouldn't happen if button states are managed correctly
-            self.show_error_dialog("Race type not known. Please load a valid race database.")
-
-    def update_button_states(self):
-        """
-        🔄 This checks what we have loaded and enables/disables buttons accordingly.
-        Updates the dynamic results button label and functionality based on race type.
-        """
-        # 🔍 Check if we have database connection
-        has_db = self.conn is not None
-        has_runners = False
-        has_results = False
-        
-        if has_db:
-            try:
-                # 🔍 Check if there are any runners in the database
-                cursor = self.conn.execute("SELECT COUNT(*) FROM runners")
-                runner_count = cursor.fetchone()[0]
-                has_runners = runner_count > 0
-                
-                # 🔍 Check if there are any race results
-                cursor = self.conn.execute("SELECT COUNT(*) FROM results WHERE finish_time IS NOT NULL")
-                result_count = cursor.fetchone()[0]
-                has_results = result_count > 0
-                
-            except sqlite3.Error:
-                # 😟 If there's an error checking, keep buttons disabled
-                pass
-        
-        # 🎮 Update static button states
-        if self.load_csv_button:
-            self.load_csv_button.set_sensitive(has_db)
-            
-        if self.view_runners_button:
-            self.view_runners_button.set_sensitive(has_runners)
-            
-        if self.start_race_button:
-            self.start_race_button.set_sensitive(has_runners)
-            
-        if self.individual_results_button:
-            self.individual_results_button.set_sensitive(has_results)
-            
-        # 🏃 Update dynamic results button based on race type (same logic as console)
-        if self.dynamic_results_button:
-            if self.race_type == "cross_country":
-                # 🏃‍♀️ Cross country race loaded - show team results option
-                self.dynamic_results_button.set_label("Show Team Results")
-                self.dynamic_results_button.set_sensitive(has_results)
-                if has_results:
-                    self.dynamic_results_button.set_tooltip_text("View cross country team scoring results")
-                else:
-                    self.dynamic_results_button.set_tooltip_text("Complete a race to see team results")
-                    
-            elif self.race_type == "road_race":
-                # 🏃‍♂️ Road race loaded - show age group results option
-                self.dynamic_results_button.set_label("Show Age Group Results")
-                self.dynamic_results_button.set_sensitive(has_results)
-                if has_results:
-                    self.dynamic_results_button.set_tooltip_text("View road race age group results")
-                else:
-                    self.dynamic_results_button.set_tooltip_text("Complete a race to see age group results")
-                    
-            else:
-                # 🤷 No race type detected or no database loaded
-                self.dynamic_results_button.set_label("Show Results (Load database first)")
-                self.dynamic_results_button.set_sensitive(False)
-                if not has_db:
-                    self.dynamic_results_button.set_tooltip_text("Load a race database first")
-                else:
-                    self.dynamic_results_button.set_tooltip_text("Race type not detected")
-
-    def view_all_runners(self, button):
-        """
-        👥 This shows a list of all runners registered for the race.
-        Display format depends on race type (same data structure as console).
-        """
-        # 🛑 Make sure we have a database loaded
-        if not self.conn:
-            self.show_text_window("All Runners", "No database loaded.")
-            return
-
-        try:
-            # 🔍 Get all runners from database, sorted by bib number
-            if self.race_type == "cross_country":
-                cursor = self.conn.execute("SELECT bib, name, team, age, grade FROM runners ORDER BY bib")
-            else:  # road_race
-                cursor = self.conn.execute("SELECT bib, name, dob, age FROM runners ORDER BY bib")
-            rows = cursor.fetchall()
-        except sqlite3.OperationalError as e:
-            # 😟 Something went wrong reading from database
-            self.show_text_window("All Runners", f"Database error: {e}")
-            return
-
-        # 🔍 Check if we have any runners loaded
-        if not rows:
-            self.show_text_window("All Runners", "No runners loaded. Please load a CSV file.")
-            return
-
-        # 📝 Build text to show all runners
-        output = "ALL REGISTERED RUNNERS\n"
-        output += "=" * 70 + "\n"
-        
-        if self.race_type == "cross_country":
-            # 🏃‍♀️ Cross country format
-            output += f"{'BIB':<8}{'NAME':<25}{'TEAM':<20}{'AGE':<5}{'GRADE'}\n"
-            output += "-" * 70 + "\n"
-            
-            for bib, name, team, age, grade in rows:
-                output += f"{bib:<8}{name[:24]:<25}{team[:19]:<20}{age:<5}{grade}\n"
-        else:
-            # 🏃‍♂️ Road race format
-            output += f"{'BIB':<8}{'NAME':<30}{'DOB':<12}{'AGE'}\n"
-            output += "-" * 70 + "\n"
-            
-            for bib, name, dob, age in rows:
-                output += f"{bib:<8}{name[:29]:<30}{dob:<12}{age}\n"
-        
-        # 📺 Show the list in a window
-        self.show_text_window("All Runners", output)
-
-    def start_race(self, button):
-        """
-        🏁 This starts the race timing system.
-        Records start time and opens timing window (compatible with console results format).
-        """
-        # 🛑 Make sure we have a database loaded
-        if not self.conn:
-            self.show_text_window("Start Race", "No database loaded.")
-            return
-
-        # ⏰ Record the current time as race start time
-        race_start_time = datetime.datetime.now()
-        race_date = race_start_time.strftime('%Y-%m-%d')
-        
-        try:
-            # 📊 Open the race timing window
-            self.open_race_timing_window(race_start_time, race_date)
-            
-        except sqlite3.Error as e:
-            # 😟 Something went wrong with database
-            self.show_error_dialog(f"Database error: {e}")
-
-    def open_race_timing_window(self, start_time, race_date):
-        """
-        ⏱️ This creates the race timing window.
-        Records finish times in same format as console version.
-        """
-        # 🏠 Create race timing window
-        timing_window = Gtk.Window(title="Race Timing - IN PROGRESS")
-        timing_window.set_default_size(600, 500)
-        timing_window.set_transient_for(self.main_window)
-        timing_window.set_modal(True)
-        
-        # 📦 Create container for everything
-        vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10,
-                       margin_top=20, margin_bottom=20, margin_start=20, margin_end=20)
-        
-        # ⏰ Create big timer display
-        timer_label = Gtk.Label()
-        timer_label.set_markup("<span size='24000' weight='bold'>00:00:00</span>")
-        vbox.append(timer_label)
-        
-        # 📝 Show when race started
-        start_label = Gtk.Label(label=f"Race started: {start_time.strftime('%H:%M:%S')}")
-        vbox.append(start_label)
-        
-        # ➖ Add separator
-        separator = Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL)
-        vbox.append(separator)
-        
-        # 📝 Instructions
-        instructions = Gtk.Label()
-        instructions.set_markup(
-            "<b>Instructions:</b>\n"
-            "• Enter bib number and press Enter to record finish\n"
-            "• Type 'exit' and press Enter to stop timing"
-        )
-        instructions.set_justify(Gtk.Justification.LEFT)
-        vbox.append(instructions)
-        
-        # 📝 Create text box for entering bib numbers
-        bib_entry = Gtk.Entry(placeholder_text="Enter bib number or 'exit'")
-        vbox.append(bib_entry)
-        
-        # 📺 Create area to show results
-        scrolled_window = Gtk.ScrolledWindow()
-        scrolled_window.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
-        scrolled_window.set_vexpand(True)
-        scrolled_window.set_hexpand(True)
-        
-        results_textview = Gtk.TextView()
-        results_textview.set_editable(False)
-        results_textview.set_wrap_mode(Gtk.WrapMode.WORD)
-        results_buffer = results_textview.get_buffer()
-        results_buffer.set_text("Finish times will appear here...\n")
-        
-        scrolled_window.set_child(results_textview)
-        vbox.append(scrolled_window)
-        
-        timing_window.set_child(vbox)
-        
-        finish_count = 0  # 🔢 Keep track of finishers
-        
-        def update_timer():
-            """⏰ Updates the race timer every second."""
-            current_time = datetime.datetime.now()
-            elapsed = current_time - start_time
-            
-            # 🕐 Format as HH:MM:SS
-            total_seconds = elapsed.total_seconds()
-            hours = int(total_seconds // 3600)
-            minutes = int((total_seconds % 3600) // 60)
-            seconds = int(total_seconds % 60)
-            
-            time_str = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
-            timer_label.set_markup(f"<span size='24000' weight='bold'>{time_str}</span>")
-            
-            return True  # 🔄 Keep calling this function
-        
-        # ⏰ Start the timer (updates every second)
-        timer_id = GLib.timeout_add(1000, update_timer)
-        
-        def on_bib_entry_activate(entry):
-            """🎯 This runs when someone enters a bib number and presses Enter."""
-            nonlocal finish_count
-            
-            # 📝 Get what the user typed
-            bib_text = entry.get_text().strip()
-            entry.set_text("")  # 🧹 Clear for next entry
-            
-            # 🚪 Check if user wants to exit
-            if bib_text.lower() == 'exit':
-                GLib.source_remove(timer_id)  # ⏹️ Stop timer
-                timing_window.destroy()        # 🚪 Close window
-                self.update_button_states()    # 🔄 Update buttons
-                return
-            
-            # ⏰ Record finish time
-            finish_time = datetime.datetime.now()
-            elapsed_seconds = (finish_time - start_time).total_seconds()
-            finish_count += 1
-            
-            # 🔢 Determine bib number
-            try:
-                bib_number = int(bib_text) if bib_text else 0
-            except ValueError:
-                bib_number = 0
-            
-            # 💾 Save to database (same format as console version)
-            try:
-                self.conn.execute('INSERT INTO results (bib, finish_time, race_date) VALUES (?, ?, ?)',
-                                  (bib_number, elapsed_seconds, race_date))
-                self.conn.commit()
-                
-                # 📝 Show result in timing window
-                elapsed_display = self.format_time(elapsed_seconds)
-                result_text = f"{finish_count:3d}. Bib {bib_number:3d} - {elapsed_display}\n"
-                
-                end_iter = results_buffer.get_end_iter()
-                results_buffer.insert(end_iter, result_text)
-                
-                # 📜 Scroll to show newest result
-                mark = results_buffer.get_insert()
-                results_textview.scroll_mark_onscreen(mark)
-                
             except sqlite3.Error as e:
-                print(f"Database error: {e}")
-        
-        # 🔗 Connect bib entry to function
-        bib_entry.connect("activate", on_bib_entry_activate)
-        
-        def on_window_close(window):
-            """🚪 Cleanup when timing window closes."""
-            GLib.source_remove(timer_id)
-            self.update_button_states()
-            return False
-        
-        timing_window.connect("close-request", on_window_close)
-        
-        # 📺 Show timing window
-        timing_window.present()
-        bib_entry.grab_focus()
+                self.show_error_window(f"Database error: {e}")
 
-    def show_individual_results(self, button):
-        """
-        🏆 Shows individual race results.
-        Uses same calculation logic as console version.
-        """
-        if not self.conn:
-            self.show_text_window("Individual Results", "No database loaded.")
-            return
+        cancel.connect("clicked", cancel_it)
+        create.connect("clicked", do_create)
+        win.present()
 
+    def load_existing_database(self, _b):
+        def accept(path: str): self.load_database(path)
+        self.open_themed_file_picker("Load Existing Database", ["*.db"], DB_SAVE_DIR, on_accept=accept)
+
+    def load_database(self, db_path: str):
         try:
-            # 🔍 Get all results, join with runner info
-            cursor = self.conn.execute('''
+            if self.conn: self.conn.close()
+            self.db_path = db_path; self.conn = sqlite3.connect(self.db_path)
+            try:
+                row = self.conn.execute("SELECT type FROM race_type").fetchone()
+                self.race_type = row[0] if row else "unknown"
+            except Exception:
+                self.race_type = "unknown"
+            disp = os.path.basename(self.db_path)
+            self.set_duoline_status(f"Loaded: {disp} [{self.race_type}]")
+            self.set_window_title(f"{disp} [{self.race_type}]")
+            self.append_console(f"Loaded database: {self.db_path}\n")
+            self.update_button_states()
+        except sqlite3.Error as e:
+            self.show_error_window(f"Database error: {e}")
+
+    def load_csv_to_database(self, _b):
+        if not self.conn:
+            self.show_error_window("No database loaded. Create or load a database first."); return
+        def accept(path: str): self.process_csv_file(path)
+        start_dir = IMPORTS_DIR if INTEGRATION["integrated"] else (TRMS_ROOT/"data")
+        self.open_themed_file_picker("Select Runner CSV File", ["*.csv"], start_dir, on_accept=accept)
+
+    def process_csv_file(self, file_path: str):
+        try:
+            with open(file_path, newline='', encoding='utf-8') as f:
+                reader = csv.DictReader(f); rows = list(reader)
+            rows_processed = 0
+            if self.race_type == "cross_country":
+                expected = ['bib', 'name', 'team', 'age', 'grade', 'rfid']
+                if reader.fieldnames != expected:
+                    self.show_error_window(f"CSV must have columns: {expected}"); return
+                for r in rows:
+                    self.conn.execute("""INSERT OR REPLACE INTO runners (bib, name, team, age, grade, rfid)
+                                         VALUES (?, ?, ?, ?, ?, ?)""",
+                                      (r['bib'], r['name'], r['team'], r['age'], r['grade'], r['rfid']))
+                    rows_processed += 1
+            else:
+                expected = ['bib', 'name', 'dob', 'rfid']
+                if reader.fieldnames != expected:
+                    self.show_error_window(f"CSV must have columns: {expected}"); return
+                for r in rows:
+                    try:
+                        birth = datetime.datetime.strptime(r['dob'], "%Y-%m-%d")
+                        age = int((datetime.datetime.now() - birth).days // 365.25)
+                    except Exception:
+                        age = None
+                    self.conn.execute("""INSERT OR REPLACE INTO runners (bib, name, dob, age, rfid)
+                                         VALUES (?, ?, ?, ?, ?)""",
+                                      (r['bib'], r['name'], r['dob'], age, r['rfid']))
+                    rows_processed += 1
+            self.conn.commit()
+            self.append_console(f"Imported {rows_processed} runners from {file_path}\n")
+            self.update_button_states()
+            self.show_text_window("CSV Import", f"Successfully imported {rows_processed} runners.", copy_enabled=True, width_chars=40, wrap_mode="word", monospace=True, base_size=(420, 180))
+        except Exception as e:
+            self.show_error_window(f"Error processing CSV file: {e}")
+
+    # ----- Results
+    def show_dynamic_results(self, _b=None):
+        if self.race_type == "cross_country": self.show_team_results()
+        elif self.race_type == "road_race": self.show_age_group_results()
+        else: self.show_error_window("Race type not known. Load a valid race database.")
+
+    def view_all_runners(self, _b=None):
+        if not self.conn:
+            self.show_text_window("All Runners", "No database loaded.", copy_enabled=True, width_chars=40, wrap_mode="none", monospace=True); return
+        try:
+            if self.race_type == "cross_country":
+                rows = self.conn.execute("SELECT bib, name, team, age, grade FROM runners ORDER BY bib").fetchall()
+                header_cols = f"{'BIB':<8}{'NAME':<25}{'TEAM':<20}{'AGE':<5}{'GRADE'}"
+            else:
+                rows = self.conn.execute("SELECT bib, name, dob, age FROM runners ORDER BY bib").fetchall()
+                header_cols = f"{'BIB':<8}{'NAME':<30}{'DOB':<12}{'AGE'}"
+        except sqlite3.Error as e:
+            self.show_error_window(f"Database error: {e}"); return
+
+        if not rows:
+            self.show_text_window("All Runners", "No runners loaded. Please load a CSV file.", copy_enabled=True, width_chars=40, wrap_mode="none", monospace=True); return
+
+        title_line = "ALL REGISTERED RUNNERS"
+        header_len = max(len(title_line), len(header_cols)) + 10
+        output = f"{title_line}\n{'='*header_len}\n{header_cols}\n{'-'*len(header_cols)}\n"
+        if self.race_type == "cross_country":
+            for bib, name, team, age, grade in rows:
+                output += f"{bib:<8}{(name or '')[:24]:<25}{(team or '')[:19]:<20}{str(age or ''):<5}{grade or ''}\n"
+        else:
+            for bib, name, dob, age in rows:
+                output += f"{bib:<8}{(name or '')[:29]:<30}{(dob or ''):<12}{str(age or '')}\n"
+        self.show_text_window("All Runners", output, copy_enabled=True, width_chars=header_len, wrap_mode="none", monospace=True)
+
+    def show_individual_results(self, _b=None):
+        if not self.conn:
+            self.show_text_window("Individual Results", "No database loaded.", copy_enabled=True, width_chars=40, wrap_mode="none", monospace=True); return
+        try:
+            rows = self.conn.execute("""
                 SELECT results.bib, COALESCE(runners.name,'UNKNOWN'), results.finish_time
                 FROM results LEFT JOIN runners ON results.bib = runners.bib
+                WHERE results.finish_time IS NOT NULL
                 ORDER BY results.finish_time ASC
-            ''')
-            rows = cursor.fetchall()
+            """).fetchall()
         except sqlite3.Error as e:
-            self.show_error_dialog(f"Database error: {e}")
-            return
-
+            self.show_error_window(f"Database error: {e}"); return
         if not rows:
-            self.show_text_window("Individual Results", "No race results found.")
-            return
+            self.show_text_window("Individual Results", "No race results found.", copy_enabled=True, width_chars=40, wrap_mode="none", monospace=True); return
 
-        # 📝 Build formatted results
-        output = "INDIVIDUAL RACE RESULTS\n"
-        output += "=" * 60 + "\n"
-        output += f"{'POS':<5}{'BIB':<8}{'NAME':<25}{'TIME':<12}\n"
-        output += "-" * 60 + "\n"
-        
-        for position, (bib, name, finish_time) in enumerate(rows, 1):
-            time_str = self.format_time(finish_time)
-            name_display = name[:24] if name else "UNKNOWN"
-            output += f"{position:<5}{bib:<8}{name_display:<25}{time_str:<12}\n"
-        
-        self.show_text_window("Individual Results", output)
+        title_line = "INDIVIDUAL RACE RESULTS"
+        table_header = f"{'POS':<5}{'BIB':<8}{'NAME':<25}{'TIME':<12}"
+        header_len = max(len(title_line), len(table_header)) + 10
+        output = f"{title_line}\n{'='*header_len}\n{table_header}\n{'-'*len(table_header)}\n"
+        for pos, (bib, name, t) in enumerate(rows, 1):
+            output += f"{pos:<5}{bib:<8}{(name or 'UNKNOWN')[:24]:<25}{self.format_time(t):<12}\n"
+        self.show_text_window("Individual Results", output, copy_enabled=True, width_chars=header_len, wrap_mode="none", monospace=True)
 
-    def show_team_results(self, button):
-        """
-        🏫 Shows cross country team results.
-        Uses same scoring logic as console version.
-        """
+    def show_team_results(self, _b=None):
         if not self.conn:
-            self.show_text_window("Team Results", "No database loaded.")
-            return
-            
+            self.show_text_window("Team Results", "No database loaded.", copy_enabled=True, width_chars=40, wrap_mode="none", monospace=True); return
         if self.race_type != "cross_country":
-            self.show_error_dialog("Team results are only available for cross country races.")
-            return
-
+            self.show_error_window("Team results are only available for cross country races."); return
         try:
-            # 🔍 Get all results with team info
-            cursor = self.conn.execute('''
+            rows = self.conn.execute("""
                 SELECT COALESCE(runners.team,'UNKNOWN'), results.bib, runners.name, results.finish_time
                 FROM results LEFT JOIN runners ON results.bib = runners.bib
+                WHERE results.finish_time IS NOT NULL
                 ORDER BY results.finish_time ASC
-            ''')
-            rows = cursor.fetchall()
+            """).fetchall()
         except sqlite3.Error as e:
-            self.show_error_dialog(f"Database error: {e}")
-            return
-
+            self.show_error_window(f"Database error: {e}"); return
         if not rows:
-            self.show_text_window("Team Results", "No race results found.")
-            return
+            self.show_text_window("Team Results", "No race results found.", copy_enabled=True, width_chars=40, wrap_mode="none", monospace=True); return
 
-        # 🏫 Group runners by teams (same logic as console)
+        title_line = "CROSS COUNTRY TEAM RESULTS"
+        header_len = len(title_line) + 10
+        output = f"{title_line}\n{'='*header_len}\n\n"
         teams = {}
-        for place, (team, bib, name, time) in enumerate(rows, 1):
-            teams.setdefault(team, []).append((place, bib, name, time))
+        for place, (team, bib, name, t) in enumerate(rows, 1):
+            teams.setdefault(team, []).append((place, bib, name, t))
 
-        # 🧮 Calculate team scores (same logic as console)
         scores = []
         for team, runners in teams.items():
-            if len(runners) >= 5:  # 🏃‍♀️ Need at least 5 runners to score
+            if len(runners) >= 5:
                 top5 = runners[:5]
                 displacers = runners[5:7]
-                score = sum(p[0] for p in top5)
-                tiebreak = [p[0] for p in displacers] + [float('inf'), float('inf')]
-                scores.append((team, score, top5, displacers, tiebreak[0], tiebreak[1]))
-
-        # 🏆 Sort teams by score (lowest wins)
+                score = sum(p for (p, _, _, _) in top5)
+                tb = [p for (p, _, _, _) in displacers] + [float('inf'), float('inf')]
+                scores.append((team, score, top5, displacers, tb[0], tb[1]))
         scores.sort(key=lambda x: (x[1], x[4], x[5]))
-        
-        # 📝 Build results display
-        output = "CROSS COUNTRY TEAM RESULTS\n"
-        output += "=" * 70 + "\n\n"
-        
+
         for rank, (team, score, top5, displacers, _, _) in enumerate(scores, 1):
-            output += f"Rank {rank} - Team: {team}\n"
-            output += f"Team Score = {score}\n"
-            output += "Top 5:\n"
-            for place, bib, name, time in top5:
-                time_str = self.format_time(time)
-                output += f"  Place {place}, Bib {bib}, {name}, {time_str}\n"
-            
+            output += f"Rank {rank} - Team: {team}\nTeam Score = {score}\nTop 5:\n"
+            for place, bib, name, t in top5:
+                output += f"  Place {place}, Bib {bib}, {name}, {self.format_time(t)}\n"
             if displacers:
                 output += "Displacers:\n"
-                for place, bib, name, time in displacers:
-                    time_str = self.format_time(time)
-                    output += f"  Place {place}, Bib {bib}, {name}, {time_str}\n"
+                for place, bib, name, t in displacers:
+                    output += f"  Place {place}, Bib {bib}, {name}, {self.format_time(t)}\n"
             output += "\n"
-        
-        self.show_text_window("Team Results", output)
 
-    def show_age_group_results(self, button):
-        """
-        🎂 Shows road race age group results.
-        Uses same age grouping logic as console version.
-        """
+        self.show_text_window("Team Results", output, copy_enabled=True, width_chars=header_len, wrap_mode="none", monospace=True)
+
+    def show_age_group_results(self, _b=None):
         if not self.conn:
-            self.show_text_window("Age Group Results", "No database loaded.")
-            return
-            
+            self.show_text_window("Age Group Results", "No database loaded.", copy_enabled=True, width_chars=40, wrap_mode="none", monospace=True); return
         if self.race_type != "road_race":
-            self.show_error_dialog("Age group results are only available for road races.")
-            return
-
+            self.show_error_window("Age group results are only available for road races."); return
         try:
-            # 🔍 Get all results with age info
-            cursor = self.conn.execute('''
+            rows = self.conn.execute("""
                 SELECT runners.age, runners.bib, runners.name, results.finish_time
                 FROM results LEFT JOIN runners ON results.bib = runners.bib
+                WHERE results.finish_time IS NOT NULL
                 ORDER BY results.finish_time ASC
-            ''')
-            rows = cursor.fetchall()
+            """).fetchall()
         except sqlite3.Error as e:
-            self.show_error_dialog(f"Database error: {e}")
-            return
-
+            self.show_error_window(f"Database error: {e}"); return
         if not rows:
-            self.show_text_window("Age Group Results", "No race results found.")
-            return
+            self.show_text_window("Age Group Results", "No race results found.", copy_enabled=True, width_chars=40, wrap_mode="none", monospace=True); return
 
-        # 🎂 Define age groups (same as console version)
-        age_groups = [
-            (1, 15), (16, 20), (21, 25), (26, 30), (31, 35), (36, 40),
-            (41, 45), (46, 50), (51, 55), (56, 60), (61, 65), (66, 70), (71, 200)
-        ]
-        
-        # 📚 Group results by age
+        title_line = "ROAD RACE AGE GROUP RESULTS"
+        table_header = f"{'PLACE':<8}{'BIB':<8}{'NAME':<25}{'TIME'}"
+        header_len = max(len(title_line), len(table_header)) + 10
+        output = f"{title_line}\n{'='*header_len}\n\n"
+
+        age_groups = [(1,15),(16,20),(21,25),(26,30),(31,35),(36,40),(41,45),(46,50),(51,55),(56,60),(61,65),(66,70),(71,200)]
         results_by_group = {f"{low}-{high}": [] for (low, high) in age_groups}
-        
-        for i, (age, bib, name, time) in enumerate(rows, 1):
+        overall_place = 0
+        for (age, bib, name, t) in rows:
+            overall_place += 1
+            try:
+                age_i = int(age)
+            except Exception:
+                continue
             for (low, high) in age_groups:
-                if low <= age <= high:
-                    results_by_group[f"{low}-{high}"].append((i, bib, name, time))
+                if low <= age_i <= high:
+                    results_by_group[f"{low}-{high}"].append((overall_place, bib, name, t))
                     break
 
-        # 📝 Build results display
-        output = "ROAD RACE AGE GROUP RESULTS\n"
-        output += "=" * 70 + "\n\n"
-        
-        for group, result_list in results_by_group.items():
-            if result_list:
-                output += f"Age Group {group}\n"
-                output += f"{'PLACE':<8}{'BIB':<8}{'NAME':<25}{'TIME'}\n"
-                output += "-" * 60 + "\n"
-                
-                for i, (place, bib, name, time) in enumerate(result_list, 1):
-                    time_str = self.format_time(time)
-                    name_display = name[:24] if name else "UNKNOWN"
-                    output += f"{i:<8}{bib:<8}{name_display:<25}{time_str}\n"
-                output += "\n"
-        
-        self.show_text_window("Age Group Results", output)
+        for group, lst in results_by_group.items():
+            if not lst: continue
+            output += f"Age Group {group}\n{table_header}\n{'-'*len(table_header)}\n"
+            for i, (place, bib, name, t) in enumerate(lst, 1):
+                output += f"{i:<8}{bib:<8}{(name or 'UNKNOWN')[:24]:<25}{self.format_time(t)}\n"
+            output += "\n"
 
-    def format_time(self, total_seconds):
-        """
-        ⏰ Converts seconds to MM:SS.mmm format.
-        Same formatting logic as console version.
-        """
-        if total_seconds is None:
-            return "00:00.000"
-            
-        minutes, seconds = divmod(total_seconds, 60)
-        return f"{int(minutes):02d}:{seconds:06.3f}"
+        self.show_text_window("Age Group Results", output, copy_enabled=True, width_chars=header_len, wrap_mode="none", monospace=True)
 
-    def show_instructions(self, button):
-        """
-        📖 Shows comprehensive user instructions.
-        """
-        instructions_text = """
-THE RACE TIMING SOLUTION (TRTS) - GUI VERSION
-============================================
+    def show_instructions(self, _b=None):
+        choose_line = "   • Choose race type: Cross Country, Road Race, or Triathlon (coming soon)"
+        header_len = len(choose_line) + 10
+        txt = f"""THE RACE TIMING SOLUTION (TRTS) - GUI VERSION
+{'='*header_len}
 
 GETTING STARTED:
 1. Create New Database
-   • Choose race type: Cross Country or Road Race
+{choose_line}
    • Enter race number and name
-   • Database saved as: YYYYMMDD-##-[cc/rr]-Name.db
+   • Database saved under: {DB_SAVE_DIR}
 
-2. Load Runner Data  
+2. Load Runner Data
    • Click "Load Runners from CSV"
    • Cross Country CSV: bib, name, team, age, grade, rfid
    • Road Race CSV: bib, name, dob, rfid
@@ -1205,84 +838,158 @@ RACE TIMING:
 
 RESULTS:
 4. View Results
-   • Individual Results: All runners by finish time
-   • Team Results: Cross country team scoring
-   • Age Group Results: Road race age divisions
+   • Individual Results: all runners by finish time
+   • Team Results: cross country team scoring
+   • Age Group Results: road race age divisions
 
-COMPATIBILITY:
-• Fully compatible with console version databases
-• Same authentication and file formats
-• Results can be viewed in either version
-
-DATABASE MANAGEMENT:
-• Load existing databases from previous races
-• All data automatically saved
-• Compatible with console version files
+NOTES:
+• SQLite3 is the active backend; MariaDB/TRDS is visible but disabled
+• File pickers and dialogs match the theme
+• Menu (☰) → Environment… shows system details
 """
-        
-        self.show_text_window("Instructions", instructions_text)
+        self.show_text_window("Instructions", txt, copy_enabled=True, width_chars=header_len, wrap_mode="word", monospace=True)
 
-    def show_error_dialog(self, message):
-        """
-        😟 Shows an error message in a popup dialog.
-        """
-        dialog = Gtk.Dialog(title="Error", transient_for=self.main_window, modal=True)
-        dialog.set_default_size(400, 150)
-        
-        content_area = dialog.get_content_area()
-        content_area.set_spacing(10)
-        content_area.set_margin_top(20)
-        content_area.set_margin_bottom(20)
-        content_area.set_margin_start(20)
-        content_area.set_margin_end(20)
-        
-        error_label = Gtk.Label(label=message)
-        error_label.set_wrap(True)
-        content_area.append(error_label)
-        
-        dialog.add_button("OK", Gtk.ResponseType.OK)
-        dialog.connect("response", lambda d, r: d.destroy())
-        dialog.show()
+    def on_show_env(self, *_a):
+        self.show_environment_info()
 
-    def show_text_window(self, title, content):
-        """
-        📺 Shows text content in a scrollable window.
-        """
-        dialog = Gtk.Dialog(title=title, transient_for=self.main_window, modal=True)
-        
-        # 📏 Set window size based on content
-        if len(content) < 200:
-            dialog.set_default_size(400, 200)
-        elif "RESULTS" in title.upper():
-            dialog.set_default_size(700, 500)
-        else:
-            dialog.set_default_size(500, 400)
-        
-        content_area = dialog.get_content_area()
+    def show_environment_info(self):
+        try:
+            gtk_ver = f"{Gtk.get_major_version()}.{Gtk.get_minor_version()}.{Gtk.get_micro_version()}"
+        except Exception:
+            gtk_ver = "unknown"
+        adw_ver = "unavailable"
+        if USE_ADW:
+            try:
+                adw_ver = f"{Adw.get_major_version()}.{Adw.get_minor_version()}.{Adw.get_micro_version()}"
+            except Exception:
+                pass
+        sess = os.environ.get("XDG_SESSION_TYPE", "unknown")
+        wayland_display = os.environ.get("WAYLAND_DISPLAY", "")
+        x11_display = os.environ.get("DISPLAY", "")
+        py_ver = platform.python_version()
+        plat = platform.platform()
 
-        # 📜 Create scrollable text area
-        scrolled_window = Gtk.ScrolledWindow()
-        scrolled_window.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
-        scrolled_window.set_vexpand(True)
-        scrolled_window.set_hexpand(True)
+        lines = [
+            f"Python:            {py_ver}",
+            f"Platform:          {plat}",
+            f"GTK:               {gtk_ver}",
+            f"libadwaita:        {adw_ver}",
+            "",
+            f"Session:           {sess}",
+            f"WAYLAND_DISPLAY:   {wayland_display or '—'}",
+            f"DISPLAY:           {x11_display or '—'}",
+            "",
+            f"Integration:       {INTEGRATION['status_label']}",
+            f"TRMS root:         {TRMS_ROOT}",
+            f"TRDS root:         {INTEGRATION['trds_root'] or '—'}",
+            f"SQLite dir:        {DB_SAVE_DIR}",
+            f"Imports dir:       {IMPORTS_DIR}",
+            f"MySQL dir:         {MYSQL_DIR or '—'}",
+        ]
+        longest = max(len("ENVIRONMENT"), *(len(s) for s in lines))
+        header = "=" * (longest + 10)
+        content = "ENVIRONMENT\n" + header + "\n" + "\n".join(lines) + "\n"
+        self.show_text_window("Environment", content, copy_enabled=True, width_chars=(longest+10), wrap_mode="none", monospace=True)
 
-        textview = Gtk.TextView()
-        textview.set_editable(False)
-        textview.set_wrap_mode(Gtk.WrapMode.WORD)
-        textview.add_css_class("results-text")  # 🎨 Apply monospace font
-        
-        buffer = textview.get_buffer()
-        buffer.set_text(content)
+    def start_race(self, _b=None):
+        if not self.conn:
+            self.show_error_window("No database loaded. Create or load a database first."); return
+        race_start_time = datetime.datetime.now()
+        race_date = race_start_time.strftime('%Y-%m-%d')
+        self.open_race_timing_window(race_start_time, race_date)
 
-        scrolled_window.set_child(textview)
-        content_area.append(scrolled_window)
-        
-        dialog.add_button("OK", Gtk.ResponseType.OK)
-        dialog.connect("response", lambda d, r: d.destroy())
-        dialog.show()
+    def open_race_timing_window(self, start_time, race_date):
+        win = (Adw.ApplicationWindow if USE_ADW else Gtk.ApplicationWindow)(title="Race Timing — IN PROGRESS", application=self)
+        self._remember_window(win); win.set_default_size(780, 560)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10, margin_top=16, margin_bottom=16, margin_start=16, margin_end=16)
+        self._attach_child_to_window(win, box)
 
-# 🎬 Main program entry point
-if __name__ == '__main__':
-    # 🚀 Create and run our race timing GUI app
+        timer_label = Gtk.Label(); timer_label.set_markup("<span size='24000' weight='bold'>00:00:00</span>")
+        box.append(timer_label)
+        start_label = Gtk.Label(label=f"Race started: {start_time.strftime('%H:%M:%S')}"); box.append(start_label)
+        box.append(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL))
+
+        instructions = Gtk.Label()
+        instructions.set_markup("<b>Instructions:</b>\n• Enter bib number and press Enter to record finish\n• Type 'exit' and press Enter to stop timing")
+        instructions.set_justify(Gtk.Justification.LEFT); box.append(instructions)
+
+        bib_entry = Gtk.Entry(placeholder_text="Enter bib number or 'exit'"); box.append(bib_entry)
+
+        sc = Gtk.ScrolledWindow(hexpand=True, vexpand=not is_compact)
+        tv = Gtk.TextView(); tv.set_editable(False); tv.set_wrap_mode(Gtk.WrapMode.WORD)
+        buf = tv.get_buffer(); buf.set_text("Finish times will appear here...\n")
+        sc.set_child(tv); box.append(sc)
+
+        finish_count = 0
+        def update_timer():
+            elapsed = datetime.datetime.now() - start_time
+            s = int(elapsed.total_seconds()); h = s//3600; m=(s%3600)//60; sec=s%60
+            timer_label.set_markup(f"<span size='24000' weight='bold'>{h:02d}:{m:02d}:{sec:02d}</span>"); return True
+        timer_id = GLib.timeout_add(1000, update_timer)
+
+        def on_enter(entry):
+            nonlocal finish_count
+            t = entry.get_text().strip(); entry.set_text("")
+            if t.lower() == "exit":
+                GLib.source_remove(timer_id); win.destroy(); self.update_button_states(); return
+            try: bib = int(t)
+            except ValueError: bib = 0
+            elapsed_seconds = (datetime.datetime.now() - start_time).total_seconds()
+            finish_count += 1
+            try:
+                self.conn.execute('INSERT INTO results (bib, finish_time, race_date) VALUES (?, ?, ?)', (bib, elapsed_seconds, race_date))
+                self.conn.commit()
+                line = f"{finish_count:3d}. Bib {bib:3d} - {self.format_time(elapsed_seconds)}\n"
+                end = buf.get_end_iter(); buf.insert(end, line); tv.scroll_mark_onscreen(buf.get_insert())
+            except sqlite3.Error as e:
+                self.append_console(f"DB error (timing insert): {e}\n")
+
+        bib_entry.connect("activate", on_enter)
+        win.connect("close-request", lambda *a: (GLib.source_remove(timer_id), self.update_button_states(), False))
+        win.present(); bib_entry.grab_focus()
+
+    def update_button_states(self):
+        has_db = self.conn is not None
+        has_results = False
+        if has_db:
+            try:
+                result_count = self.conn.execute("SELECT COUNT(*) FROM results WHERE finish_time IS NOT NULL").fetchone()[0]
+                has_results = result_count > 0
+            except sqlite3.Error:
+                pass
+        if self.dynamic_results_button:
+            if self.race_type == "cross_country":
+                self.dynamic_results_button.set_label("Show Team Results")
+                self.dynamic_results_button.set_sensitive(has_results)
+            elif self.race_type == "road_race":
+                self.dynamic_results_button.set_label("Show Age Group Results")
+                self.dynamic_results_button.set_sensitive(has_results)
+            else:
+                self.dynamic_results_button.set_label("Show Results (Load database first)")
+                self.dynamic_results_button.set_sensitive(False)
+        # Toggle Individual Results button sensitivity based on presence of results
+        if getattr(self, "individual_results_button", None):
+            self.individual_results_button.set_sensitive(has_results)
+
+    def format_time(self, total_seconds):
+        if total_seconds is None: return "00:00.000"
+        minutes, seconds = divmod(total_seconds, 60)
+        return f"{int(minutes):02d}:{seconds:06.3f}"
+
+def main():
+    print('DEBUG: entering main()')
     app = RaceTimingApp()
-    app.run()
+    try:
+        app.connect('activate', lambda *a: print('DEBUG: GApplication activate signal'))
+    except Exception as e:
+        print('DEBUG: connect(activate) failed:', e)
+    rc = app.run(None)
+    print('DEBUG: app.run() returned', rc)
+
+print(f"DEBUG: __name__ = {__name__}")
+if __name__ == "__main__":
+    print("DEBUG: __main__ guard matched")
+    main()
+elif os.environ.get("TRTS_AUTO_START") == "1":
+    print("DEBUG: TRTS_AUTO_START=1 -> starting anyway")
+    main()
